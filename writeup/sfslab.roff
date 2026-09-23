@@ -469,24 +469,28 @@ points.  Normal concurrent tests still run, but passing tests cannot prove
 that no race exists.  Use a TSan-capable environment for additional checking.
 .SUB "Performance (10 points)"
 .PP
-The optional performance benchmark runs with make grade or
-./test-sfs --benchmark, and only after correctness is 12/12.  It starts
+The optional performance benchmark runs with
+.CW "make grade"
+or
+.CW "./test-sfs --benchmark" ,
+and only after correctness is 12/12. It starts
 8 threads, each working on its own file.  A thread performs 16000
 .I sessions ;
-one session is one
-.CW sfs_open ,
-then 10 rounds of write/getpos/seek/read, then one
-.CW sfs_close
-\(em 5,376,000 API calls per run in total.  Timing starts immediately before
+one session opens separate write/read descriptors for the same file,
+performs 10 write/read pairs, and closes both descriptors
+\(em 3,072,000 API calls per run in total. Timing starts immediately before
 a start gate releases the already-created threads, so thread startup is
 excluded; the benchmark is sampled
 5 times and the median ops/sec is scored.
 .PP
-The workload validates its own results as it runs: every return value is
-checked against the position the descriptor must be at, and every round seeks
-back and compares the exact bytes it just wrote.  If any check
+The descriptors advance together: each read checks the bytes just written.
+Both the baseline and student code validate return values and every payload;
+the baseline's unimplemented getpos/seek APIs are not used. If any check
 fails, the performance score is 0 \(em an implementation that is fast but
 wrong on the benchmark path earns nothing.
+.PP
+Workload v5 requires fresh calibration; re-run
+.CW "make baseline" .
 .PP
 Raw throughput is machine-dependent, so the score is a ratio against the
 provided baseline (the handout implementation under one global mutex),

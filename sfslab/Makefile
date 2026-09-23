@@ -57,7 +57,7 @@ baseline: test-sfs-baseline
 	  | awk -v n=$(BASELINE_RUNS) 'NR==int((n+1)/2){print; exit}' \
 	  > .perf_baseline
 	@printf 'SFS_DISK_DIR=%s\n' "$${SFS_DISK_DIR:-(unset)}" >> .perf_baseline
-	@printf 'WORKLOAD=v3\n' >> .perf_baseline  # keep in sync with PERF_WORKLOAD_VERSION (test-sfs.c)
+	@printf 'WORKLOAD=v5\n' >> .perf_baseline  # keep in sync with PERF_WORKLOAD_VERSION (test-sfs.c)
 	@awk 'NR==1{min=$$1; max=$$1} \
 	      {if($$1<min)min=$$1; if($$1>max)max=$$1} \
 	      END{printf "  spread: min=%.2f max=%.2f (%.1f%% of midpoint)\n", \

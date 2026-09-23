@@ -112,7 +112,7 @@ static void cleanup_concurrency_disks(void)
 /* Keep a copy of a failing trace's disk image(s) for post-mortem fsck.
    On by default for human runs; off under --tsan-only so the sanitizer
    sweep stays clean.  SFS_KEEP_FAILED_DISKS=0/1 overrides.
-   The copies match the *.img cleanup glob (make clean). */
+   Images live in a private directory and are not removed by make clean. */
 static int keep_failed_disks;
 static int quiet_mode;   /* -q: suppress all FAIL detail output */
 
@@ -1311,7 +1311,8 @@ static int trace_C00(void)
           list_status);
 
     unmount_and_check(CONC_DISK_C00);
-    unlink(CONC_DISK_C00);
+    if (trace_ok)
+        unlink(CONC_DISK_C00);
     return trace_ok;
 }
 
@@ -1361,7 +1362,8 @@ static int trace_C01(void)
           "concurrent reads of same file failed");
 
     unmount_and_check(CONC_DISK_C01);
-    unlink(CONC_DISK_C01);
+    if (trace_ok)
+        unlink(CONC_DISK_C01);
     return trace_ok;
 }
 
@@ -1520,7 +1522,8 @@ static int trace_C02(void)
     }
     CHECK(ok && nthreads == NUM_THREADS, "concurrent r/w mix failed");
     unmount_and_check(CONC_DISK_C02_RW);
-    unlink(CONC_DISK_C02_RW);
+    if (trace_ok)
+        unlink(CONC_DISK_C02_RW);
 
     /* Part 2: open/close storm on same file */
     sfs_format(CONC_DISK_C02_STORM, disk_size());
@@ -1558,7 +1561,8 @@ static int trace_C02(void)
           list_status);
 
     unmount_and_check(CONC_DISK_C02_STORM);
-    unlink(CONC_DISK_C02_STORM);
+    if (trace_ok)
+        unlink(CONC_DISK_C02_STORM);
 
     /* Part 3: directory churn (create/rename/remove) under a live lister */
     sfs_format(CONC_DISK_C02_DIR, disk_size());
@@ -1602,7 +1606,8 @@ static int trace_C02(void)
           list_status);
 
     unmount_and_check(CONC_DISK_C02_DIR);
-    unlink(CONC_DISK_C02_DIR);
+    if (trace_ok)
+        unlink(CONC_DISK_C02_DIR);
     return trace_ok;
 }
 
@@ -1613,8 +1618,10 @@ static int trace_C02(void)
 #define PERF_THREADS 8
 
 /* Workload shape: each thread runs PERF_OUTER_ITERS sessions against
-   its own file; a session is one open, then PERF_IO_ROUNDS rounds of
-   write/getpos/seek/read, then one close.  Amortizing open/close over
+   its own file; a session opens separate write/read descriptors, runs
+   PERF_IO_ROUNDS write/read pairs, then closes both. This uses only
+   provided APIs, so the baseline and student code do the same work.
+   Amortizing open/close over
    the I/O rounds keeps the (necessarily shared) fd table from
    dominating, so the measurement reflects how well *file data* ops on
    different files proceed in parallel -- the thing the lab asks you
@@ -1628,8 +1635,8 @@ static int trace_C02(void)
    a meaningless ratio. */
 #define PERF_OUTER_ITERS 16000
 #define PERF_IO_ROUNDS 10
-#define PERF_CALLS_PER_THREAD (PERF_OUTER_ITERS * (2 + 4 * PERF_IO_ROUNDS))
-#define PERF_WORKLOAD_VERSION "v3"
+#define PERF_CALLS_PER_THREAD (PERF_OUTER_ITERS * (4 + 2 * PERF_IO_ROUNDS))
+#define PERF_WORKLOAD_VERSION "v5"
 
 /* Scored perf benchmark samples this many times and uses the median.
    Matches baseline calibration (make baseline BASELINE_RUNS=N); odd so
@@ -1666,38 +1673,30 @@ static void *perf_worker(void *arg)
                                   memory_order_relaxed);
             continue;
         }
-        ssize_t expected_pos = 0;
+        int reader = sfs_open(fname);
+        if (reader < 0)
+            goto bad;
         for (int k = 0; k < PERF_IO_ROUNDS; k++)
         {
             char data[64];
             int len = snprintf(data, sizeof data, "iter-%d-%d-%d", id, i, k);
             ssize_t nw = sfs_write(fd, data, (size_t)len);
-            ssize_t pos = sfs_getpos(fd);
-            ssize_t sk = sfs_seek(fd, -(ssize_t)len);
             char buf[64];
-            ssize_t nr = sfs_read(fd, buf, (size_t)len);
+            ssize_t nr = sfs_read(reader, buf, (size_t)len);
 
-            /* Validate every payload as we go.  Each round writes where the
-               previous read stopped, seeks back by that write's length, and
-               reads the exact bytes just written.  The calibration baseline's
-               getpos and seek are -ENOSYS stubs; position checks are skipped in
-               that case, which cannot happen in a scored run because
-               correctness (A02/A03) gates the benchmark. */
-            if (nw != (ssize_t)len)
+            /* The two positions advance together. Validate the baseline and
+               student implementation identically, including every read. */
+            if (nw != (ssize_t)len || nr != nw ||
+                memcmp(buf, data, (size_t)len) != 0)
                 goto bad;
-            if (pos != -ENOSYS)
-            {
-                if (pos != expected_pos + nw || sk != expected_pos || nr != nw)
-                    goto bad;
-                if (memcmp(buf, data, (size_t)len) != 0)
-                    goto bad;
-                expected_pos = pos;
-            }
         }
+        sfs_close(reader);
         sfs_close(fd);
         continue;
     bad:
         atomic_store_explicit(&perf_worker_failed, 1, memory_order_relaxed);
+        if (reader >= 0)
+            sfs_close(reader);
         sfs_close(fd);
     }
     return NULL;
@@ -1804,11 +1803,9 @@ static int score_perf_absolute(double student_ops)
 
 /* Score student's ops/sec against the machine-calibrated baseline.
    ratio = student_ops / baseline_ops, where the baseline binary is the
-   handout implementation under a single global mutex.  The ladder is
-   calibrated against real coarse- and fine-grained implementations so a
-   correct solution which keeps one global lock measures ~1.0x and earns 3/10,
-   while the scaling a per-file locking scheme delivers (>= ~4.5x on
-   the calibration machine) clears the 10/10 bar with a wide margin. */
+   handout implementation under a single global mutex. A correct solution
+   with one global lock should measure near 1.0x. The existing score ladder
+   is retained; achievable speedup depends on the machine. */
 static int score_perf_against_baseline(double student_ops)
 {
     struct baseline_info bi;
@@ -1919,6 +1916,11 @@ static double run_perf_benchmark_raw(void)
 
     double secs = elapsed_sec(&t0, &t1);
     double total_calls = (double)PERF_THREADS * PERF_CALLS_PER_THREAD;
+    if (secs <= 0.0)
+    {
+        atomic_store_explicit(&perf_worker_failed, 1, memory_order_relaxed);
+        return 0.0;
+    }
     return total_calls / secs;
 }
 
@@ -2458,24 +2460,38 @@ int main(int argc, char *argv[])
            (longer than a Category C trace because slower machines may
            legitimately take more time on the full workload). */
         fflush(stdout); fflush(stderr);
-        pid_t pid = fork();
+        /* A student's exit code is not a score. Only accept a result that
+           the completed benchmark explicitly sent through this pipe. */
+        int score_pipe[2] = {-1, -1};
+        pid_t pid = -1;
+        if (pipe2(score_pipe, O_CLOEXEC | O_NONBLOCK) == 0)
+            pid = fork();
         if (pid < 0)
         {
-            fprintf(stderr, "fork() for perf failed: %s\n", strerror(errno));
+            fprintf(stderr, "starting perf failed: %s\n", strerror(errno));
+            if (score_pipe[0] >= 0) close(score_pipe[0]);
+            if (score_pipe[1] >= 0) close(score_pipe[1]);
             perf = 0;
         }
         else if (pid == 0)
         {
+            close(score_pipe[0]);
             int score = run_perf_benchmark();
             /* Flush stdio so the child's "Student throughput", "Baseline",
                and "Ratio" lines survive output redirection. */
             fflush(stdout);
             fflush(stderr);
-            _exit(score);
+            ssize_t sent;
+            do {
+                sent = write(score_pipe[1], &score, sizeof score);
+            } while (sent < 0 && errno == EINTR);
+            close(score_pipe[1]);
+            _exit(sent == (ssize_t)sizeof score ? 0 : 1);
         }
         else
         {
-            int status = 0;
+            close(score_pipe[1]);
+            int status = -1;
             int elapsed_ms = 0;
             const int step_ms = 100;
             const int perf_budget_ms = 60 * 1000;
@@ -2485,6 +2501,7 @@ int main(int argc, char *argv[])
                 if (r == pid) break;
                 if (r < 0)
                 {
+                    if (errno == EINTR) continue;
                     fprintf(stderr, "waitpid(perf): %s\n", strerror(errno));
                     break;
                 }
@@ -2504,14 +2521,21 @@ int main(int argc, char *argv[])
                 unlink(PERF_DISK);
                 perf = 0;
             }
-            else if (WIFEXITED(status))
+            else if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
             {
-                perf = WEXITSTATUS(status);
+                int score;
+                ssize_t received;
+                do {
+                    received = read(score_pipe[0], &score, sizeof score);
+                } while (received < 0 && errno == EINTR);
+                if (received == (ssize_t)sizeof score && score >= 0 && score <= 10)
+                    perf = score;
             }
             else
             {
                 perf = 0;
             }
+            close(score_pipe[0]);
         }
         printf("  Score: %d/10\n", perf);
     }

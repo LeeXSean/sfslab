@@ -481,7 +481,8 @@ static int check_directory_entries(const char *disk,
                                    const sfs_filesystem_t *superblock,
                                    const sfs_dir_entry_t *files,
                                    unsigned char *bytemap,
-                                   unsigned char *file_tag_p)
+                                   unsigned char *file_tag_p,
+                                   const char *names[])
 {
     int status = 0;
     unsigned char file_tag = *file_tag_p;
@@ -572,6 +573,22 @@ static int check_directory_entries(const char *disk,
             continue;
         }
 
+        if (!name_err)
+        {
+            for (size_t j = 0; j < (size_t)(file_tag - B_file0); j++)
+            {
+                if (names[j] && strcmp(names[j], files[i].name) == 0)
+                {
+                    fprintf(stderr,
+                            "%s: error: dir entry %zu: duplicate file name\n",
+                            disk, i);
+                    status = 1;
+                    break;
+                }
+            }
+            names[file_tag - B_file0] = files[i].name;
+        }
+
         // ... and the size should agree with the number of allocated
         // blocks, assuming the allocation list is valid.
         uint32_t nblocks = 0;
@@ -613,6 +630,7 @@ static int check_root_directory(const char *disk,
                                 unsigned char *bytemap)
 {
     unsigned char file_tag = B_file0;
+    const char *names[256 - B_file0] = {0};
     int status;
 
     if (verbose)
@@ -622,7 +640,7 @@ static int check_root_directory(const char *disk,
                 disk);
     }
     status = check_directory_entries(disk, superblock, superblock->files,
-                                     bytemap, &file_tag);
+                                     bytemap, &file_tag, names);
 
     block_id b = superblock->next_rootdir;
     while (b)
@@ -639,7 +657,7 @@ static int check_root_directory(const char *disk,
         const sfs_block_hdr_t *dh = get_block(superblock, b);
         status |= check_directory_entries(disk, superblock,
                                           ((sfs_block_dir_t *)dh)->files,
-                                          bytemap, &file_tag);
+                                          bytemap, &file_tag, names);
         b = dh->next_block;
     }
     return status;
